@@ -1,0 +1,7 @@
+{
+  "port": 8787,
+  "token": "CHANGE_ME",
+  "social": { "kind": "mock", "platform": "mock", "url": "", "token": "" },
+  "knowledge": { "kind": "file", "dir": "docs", "url": "", "token": "" },
+  "schedule": { "posts": [], "pollSeconds": 60 }
+}

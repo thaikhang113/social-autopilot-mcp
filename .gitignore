@@ -1,0 +1,15 @@
+# Keep secrets and local state out of git.
+node_modules/
+data/
+*.log
+*.tmp
+
+# local overrides (config.json is committed with safe defaults; if you set a real
+# token, prefer config.local.json — see README §7)
+config.local.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
