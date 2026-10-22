@@ -1,5 +1,7 @@
 // End-to-end check against an already-running server (node src/server.mjs).
 // Runs in Node so Vietnamese text is never mangled by a shell.
+import fs from 'node:fs';
+import path from 'node:path';
 import { dueOccurrence } from '../src/engine.mjs';
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787';
 const TOKEN = process.env.SAM_TOKEN ?? '';
@@ -54,7 +56,25 @@ ok('verify_facts supports true claim', vf.supported === true, `sources=${vf.sour
 const vfBad = (await rpc('tools/call', { name: 'verify_facts', arguments: { query: 'giấy phép mã nguồn mở', draft: 'Dự án yêu cầu mua bản quyền máy chủ phần cứng chuyên dụng' } })).structuredContent;
 ok('verify_facts rejects invented price', vfBad.supported === false);
 
-// 2. a comment event must be pending (seeded in data/inbox.json)
+// 2. ensure a fresh comment is seeded in data/inbox.json
+const inboxPath = path.resolve(import.meta.dirname, '..', 'data', 'inbox.json');
+const testCommentId = `c_e2e_${Date.now()}`;
+fs.writeFileSync(
+  inboxPath,
+  JSON.stringify(
+    [
+      {
+        id: testCommentId,
+        author: 'Lập trình viên',
+        text: 'Dự án Social Autopilot MCP là mã nguồn mở phải không?',
+        at: new Date().toISOString(),
+      },
+    ],
+    null,
+    2
+  )
+);
+
 const pending = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events;
 const commentEv = pending.find((e) => e.kind === 'comment');
 ok('poller surfaced a comment', !!commentEv, commentEv?.summary);
@@ -146,6 +166,11 @@ if (TOKEN) {
   });
   ok('auth rejects request without token', bare.status === 401, `status=${bare.status}`);
 }
+
+// 7b. CORS & OPTIONS preflight check
+const opt = await fetch(`${BASE}/mcp`, { method: 'OPTIONS' });
+ok('CORS OPTIONS returns 204', opt.status === 204, `status=${opt.status}`);
+ok('CORS Allow-Origin header present', opt.headers.get('access-control-allow-origin') === '*', `origin=${opt.headers.get('access-control-allow-origin')}`);
 
 // 8. server still healthy after all that
 const health = await (await fetch(`${BASE}/health`)).json();

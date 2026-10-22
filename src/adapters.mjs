@@ -52,6 +52,7 @@ export class Social {
     if (this.cfg.kind === 'facebook') {
       const pageId = this.cfg.pageId ?? process.env.FB_PAGE_ID;
       const token = this.cfg.pageAccessToken ?? this.cfg.token ?? process.env.FB_PAGE_ACCESS_TOKEN;
+      if (!pageId || !token) throw new Error('Facebook adapter requires pageId and pageAccessToken (or FB_PAGE_ID, FB_PAGE_ACCESS_TOKEN)');
       // ponytail: text-only posts; upgrade to multi-media attachments or /photos endpoint when media[] is passed
       const r = await fb(`${pageId}/feed`, token, { method: 'POST', body: { message: text }, version: this.cfg.apiVersion });
       return { id: r.id };
@@ -66,6 +67,7 @@ export class Social {
     if (this.cfg.kind === 'http') return post(this.cfg.url, { op: 'reply', comment_id: commentId, text }, this.cfg.token);
     if (this.cfg.kind === 'facebook') {
       const token = this.cfg.pageAccessToken ?? this.cfg.token ?? process.env.FB_PAGE_ACCESS_TOKEN;
+      if (!token) throw new Error('Facebook adapter requires pageAccessToken (or FB_PAGE_ACCESS_TOKEN)');
       const r = await fb(`${commentId}/comments`, token, { method: 'POST', body: { message: text }, version: this.cfg.apiVersion });
       return { id: r.id };
     }
@@ -83,6 +85,7 @@ export class Social {
     if (this.cfg.kind === 'facebook') {
       const pageId = this.cfg.pageId ?? process.env.FB_PAGE_ID;
       const token = this.cfg.pageAccessToken ?? this.cfg.token ?? process.env.FB_PAGE_ACCESS_TOKEN;
+      if (!pageId || !token) return [];
       // ponytail: polls first page of feed comments & nested replies; upgrade to Meta Webhooks for real-time push
       const sinceParam = since ? `&since=${Math.floor(new Date(since).getTime() / 1000)}` : '';
       const r = await fb(

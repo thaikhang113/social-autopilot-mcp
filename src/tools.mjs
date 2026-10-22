@@ -28,6 +28,7 @@ export function registerTools(server, { data, cfg, social, knowledge, kick }) {
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
     },
     async ({ limit = 20 }) => {
+      await kick?.();
       const events = data.state.events.slice(0, limit).map((e) => ({
         id: e.id,
         kind: e.kind,

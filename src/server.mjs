@@ -82,6 +82,15 @@ if (process.argv.includes('--stdio')) {
 
   // Stateless streamable HTTP: one fresh transport+server per request.
   const httpServer = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204).end();
+      return;
+    }
+
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
 
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
