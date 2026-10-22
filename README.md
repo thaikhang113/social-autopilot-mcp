@@ -1,5 +1,7 @@
 # social-autopilot-mcp
 
+> **English** · [Tiếng Việt](README.vi.md)
+
 MCP server (Model Context Protocol) that connects ChatGPT web / Claude / any MCP client to a **social-media autopilot loop**: scheduled posting, comment triage, and fact-grounding against your own documents.
 
 > **Design rule #1 — the LLM decides, the server executes.**
