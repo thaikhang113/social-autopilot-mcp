@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node src/server.mjs",
     "stdio": "node src/server.mjs --stdio",
-    "test": "node test/adapters.test.mjs && node test/e2e.mjs",
-    "test:unit": "node test/adapters.test.mjs"
+    "test": "node test/adapters.test.mjs && node test/edge-cases.test.mjs && node test/e2e.mjs",
+    "test:unit": "node test/adapters.test.mjs && node test/edge-cases.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

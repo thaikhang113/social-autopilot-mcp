@@ -2,9 +2,27 @@
 // Runs in Node so Vietnamese text is never mangled by a shell.
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { dueOccurrence } from '../src/engine.mjs';
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787';
 const TOKEN = process.env.SAM_TOKEN ?? '';
+
+let childServer = null;
+try {
+  await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1000) });
+} catch {
+  const serverPath = path.resolve(import.meta.dirname, '..', 'src', 'server.mjs');
+  childServer = spawn(process.execPath, [serverPath], { stdio: 'ignore' });
+  process.on('exit', () => childServer?.kill());
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(500) });
+      if (res.ok) break;
+    } catch {}
+  }
+}
+
 const headers = {
   'content-type': 'application/json',
   accept: 'application/json, text/event-stream',
@@ -175,5 +193,7 @@ ok('CORS Allow-Origin header present', opt.headers.get('access-control-allow-ori
 // 8. server still healthy after all that
 const health = await (await fetch(`${BASE}/health`)).json();
 ok('server healthy', health.ok === true, `pending=${health.pending}`);
+
+if (childServer) childServer.kill();
 
 console.log(process.exitCode ? '\nSOME TESTS FAILED' : '\nALL PASSED');
