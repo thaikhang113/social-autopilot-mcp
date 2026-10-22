@@ -97,10 +97,11 @@ export function registerTools(server, { data, cfg, social, knowledge, kick }) {
     },
     async ({ query, draft }) => {
       const r = await knowledge.search(query);
-      const words = (draft ?? '').toLowerCase().split(/\s+/).filter((w) => w.length > 4);
+      const words = (draft ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w.length >= 2);
       const bag = `${r.answer}`.toLowerCase();
       const hit = words.filter((w) => bag.includes(w)).length;
-      const supported = words.length === 0 ? r.answer.length > 0 : hit / words.length >= 0.35;
+      // ponytail: bag-of-words overlap heuristic (>=50%); upgrade to embedding cosine similarity or LLM judge
+      const supported = words.length === 0 ? r.answer.length > 0 : hit / words.length >= 0.5;
       const out = { answer: r.answer ?? '', sources: r.sources ?? [], supported };
       return { structuredContent: out, content: [{ type: 'text', text: JSON.stringify(out) }] };
     }

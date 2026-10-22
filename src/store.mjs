@@ -16,15 +16,22 @@ const empty = () => ({
   outbox: [], // what we published/replied (mock platform side)
 });
 
-export const state = fs.existsSync(STATE_FILE)
-  ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
-  : empty();
+let loadedState = null;
+if (fs.existsSync(STATE_FILE)) {
+  try {
+    const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
+    if (raw) loadedState = JSON.parse(raw);
+  } catch (err) {
+    console.error('[store] corrupt state.json, recovering with empty state:', err.message);
+  }
+}
+export const state = Object.assign(empty(), loadedState ?? {});
 
 export function save() {
   // OneDrive/AV can hold the target briefly; retry instead of crashing the process.
   for (let i = 0; ; i++) {
     try {
-      const tmp = STATE_FILE + '.tmp';
+      const tmp = `${STATE_FILE}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
       fs.renameSync(tmp, STATE_FILE);
       return;

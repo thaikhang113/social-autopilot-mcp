@@ -55,7 +55,7 @@ export function startEngine({ data, cfg, social }) {
       if (!occ) continue;
       // Occurrence-scoped dedup: the same window is never raised twice, while
       // later windows still fire. A one-shot slot has one window, so it is spent.
-      const done = data.state.history.some((h) => h.slotId === slot.id && h.action === 'publish' && h.occurrence === occ);
+      const done = data.state.history.some((h) => h.slotId === slot.id && h.occurrence === occ);
       const queued = data.state.events.some((e) => e.slotId === slot.id && e.occurrence === occ);
       if (done || queued) continue;
       data.pushEvent({

@@ -138,7 +138,7 @@ export class Knowledge {
     // file kind: naive grounding over docs/*.md so replies stop hallucinating
     const dir = path.resolve(ROOT, this.cfg.dir ?? 'docs');
     if (!fs.existsSync(dir)) return { answer: '', sources: [] };
-    const terms = String(query).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    const terms = String(query).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w.length >= 2);
     const hits = [];
     for (const f of fs.readdirSync(dir).filter((f) => /\.(md|txt|json)$/i.test(f))) {
       const body = fs.readFileSync(path.join(dir, f), 'utf8');
