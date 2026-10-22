@@ -48,21 +48,21 @@ const names = tools.map((t) => t.name);
 ok('tools/list', ['list_pending_events', 'decide', 'verify_facts', 'schedule_post', 'recent_activity'].every((n) => names.includes(n)), names.join(','));
 
 // 1. grounding
-const vf = (await rpc('tools/call', { name: 'verify_facts', arguments: { query: 'giá gói cơ bản', draft: 'Gói cơ bản giá 990.000đ mỗi tháng' } })).structuredContent;
+const vf = (await rpc('tools/call', { name: 'verify_facts', arguments: { query: 'giấy phép mã nguồn mở', draft: 'Dự án Social Autopilot MCP hoàn toàn là mã nguồn mở phát hành miễn phí theo giấy phép MIT License' } })).structuredContent;
 ok('verify_facts supports true claim', vf.supported === true, `sources=${vf.sources.map((s) => s.title).join(',')}`);
 
-const vfBad = (await rpc('tools/call', { name: 'verify_facts', arguments: { query: 'giá gói cơ bản', draft: 'Gói cơ bản miễn phí trọn đời cho mọi khách hàng' } })).structuredContent;
+const vfBad = (await rpc('tools/call', { name: 'verify_facts', arguments: { query: 'giấy phép mã nguồn mở', draft: 'Dự án yêu cầu mua bản quyền máy chủ phần cứng chuyên dụng' } })).structuredContent;
 ok('verify_facts rejects invented price', vfBad.supported === false);
 
 // 2. a comment event must be pending (seeded in data/inbox.json)
 const pending = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events;
 const commentEv = pending.find((e) => e.kind === 'comment');
 ok('poller surfaced a comment', !!commentEv, commentEv?.summary);
-ok('comment text is intact UTF-8', commentEv?.text?.includes('Giá gói cơ bản'), commentEv?.text);
+ok('comment text is intact UTF-8', commentEv?.text?.includes('mã nguồn mở'), commentEv?.text);
 
 // 3. publish a post with Vietnamese content, check it round-trips unchanged
-const post = ' meet  Ưu đãi hôm nay: gói cơ bản 990.000đ/tháng, hoàn tiền 7 ngày.';
-const slot = (await rpc('tools/call', { name: 'schedule_post', arguments: { brief: 'bài đăng giá', at: new Date(Date.now() - 60_000).toISOString() } })).structuredContent;
+const post = '🚀 Social Autopilot MCP là dự án mã nguồn mở kết nối AI với mạng xã hội.';
+const slot = (await rpc('tools/call', { name: 'schedule_post', arguments: { brief: 'bài đăng giới thiệu mã nguồn mở', at: new Date(Date.now() - 60_000).toISOString() } })).structuredContent;
 ok('schedule_post', !!slot.slotId, slot.slotId);
 
 // The engine may surface the due slot on its next tick; poll briefly instead of
@@ -81,7 +81,7 @@ const pub = (await rpc('tools/call', { name: 'decide', arguments: { event_id: du
 ok('decide+publish sent', !!pub.performed, pub.performed);
 
 // 4. reply to the comment with grounded text
-const reply = (await rpc('tools/call', { name: 'decide', arguments: { event_id: commentEv.id, action: 'reply', text: 'Dạ gói cơ bản là 990.000đ/tháng ạ.', perform: true } })).structuredContent;
+const reply = (await rpc('tools/call', { name: 'decide', arguments: { event_id: commentEv.id, action: 'reply', text: 'Dạ vâng, dự án hoàn toàn là mã nguồn mở miễn phí theo giấy phép MIT ạ.', perform: true } })).structuredContent;
 ok('decide+reply sent', !!reply.performed, reply.performed);
 
 // 5. skip a comment = no send

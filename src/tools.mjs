@@ -59,9 +59,9 @@ export function registerTools(server, { data, cfg, social, knowledge, kick }) {
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
     },
     async ({ event_id, action, text, reason, perform }) => {
+      if ((action === 'reply' || action === 'publish') && !text?.trim()) throw new Error(`${action} needs text`);
       const ev = data.takeEvent(event_id);
       if (!ev) throw new Error(`unknown or already-decided event: ${event_id}`);
-      if ((action === 'reply' || action === 'publish') && !text?.trim()) throw new Error(`${action} needs text`);
 
       const entry = { ...ev, action, text: text ?? '', reason: reason ?? '', at: new Date().toISOString() };
       let performed;

@@ -90,6 +90,19 @@ State nằm trong `data/state.json` (ghi nguyên tử: temp + rename, có retry)
 
 Chỉ `src/adapters.mjs` thay đổi. `config.json` chọn cách hiện thực:
 
+#### Nối trực tiếp Facebook Graph API (Fanpage)
+```json
+{
+  "social": {
+    "kind": "facebook",
+    "pageId": "ID_TRANG_CUA_BAN",
+    "pageAccessToken": "EAA..."
+  }
+}
+```
+*(Có thể cấp qua biến môi trường `FB_PAGE_ID` và `FB_PAGE_ACCESS_TOKEN`)*.
+
+#### Nối qua Custom HTTP Bridge
 ```json
 { "social": { "kind": "http", "url": "http://127.0.0.1:9000/social", "token": "..." } }
 ```
