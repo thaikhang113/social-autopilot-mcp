@@ -38,6 +38,7 @@ const dataApi = {
 };
 const social = new Social(dataApi, cfg);
 const knowledge = new Knowledge(cfg);
+let engine = null;
 
 function buildServer() {
   const server = new McpServer(
@@ -51,16 +52,18 @@ function buildServer() {
         '4) call decide with perform=true to actually send. Keep replies short and in the user language.',
     }
   );
-  registerTools(server, { data: dataApi, cfg, social, knowledge });
+  // `kick` is a late-bound getter: the engine starts after the first server is
+  // built (stdio path), and a captured null would never tick again.
+  registerTools(server, { data: dataApi, cfg, social, knowledge, kick: () => engine?.tick?.() });
   return server;
 }
 
 if (process.argv.includes('--stdio')) {
   const server = buildServer();
   await server.connect(new StdioServerTransport());
-  startEngine({ data: dataApi, cfg, social });
+  engine = startEngine({ data: dataApi, cfg, social });
 } else {
-  startEngine({ data: dataApi, cfg, social });
+  engine = startEngine({ data: dataApi, cfg, social });
 
   // Stateless streamable HTTP: one fresh transport+server per request.
   const httpServer = http.createServer(async (req, res) => {

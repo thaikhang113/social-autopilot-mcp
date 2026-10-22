@@ -60,5 +60,7 @@ export function startEngine({ data, cfg, social }) {
   tick();
   const timer = setInterval(tick, sec);
   timer.unref?.();
-  return timer;
+  // Exposed so schedule_post can raise a due event immediately instead of
+  // waiting up to pollSeconds. Callers must not add a second timer.
+  return { timer, tick };
 }

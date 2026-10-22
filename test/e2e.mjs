@@ -59,8 +59,18 @@ const post = ' meet  Ưu đãi hôm nay: gói cơ bản 990.000đ/tháng, hoàn 
 const slot = (await rpc('tools/call', { name: 'schedule_post', arguments: { brief: 'bài đăng giá', at: new Date(Date.now() - 60_000).toISOString() } })).structuredContent;
 ok('schedule_post', !!slot.slotId, slot.slotId);
 
-const due = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.find((e) => e.kind === 'post_due');
+// The engine may surface the due slot on its next tick; poll briefly instead of
+// assuming the poll interval already elapsed.
+const due = await (async () => {
+  for (let i = 0; i < 20; i++) {
+    const ev = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.find((e) => e.kind === 'post_due');
+    if (ev) return ev;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return undefined;
+})();
 ok('scheduled slot produced a due event', !!due);
+if (!due) process.exit(1);
 const pub = (await rpc('tools/call', { name: 'decide', arguments: { event_id: due.id, action: 'publish', text: post, perform: true } })).structuredContent;
 ok('decide+publish sent', !!pub.performed, pub.performed);
 

@@ -3,7 +3,7 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
 
-export function registerTools(server, { data, cfg, social, knowledge }) {
+export function registerTools(server, { data, cfg, social, knowledge, kick }) {
   const auth = (token) => {
     if (!cfg.token || cfg.token === 'CHANGE_ME') return true; // local dev
     return token === cfg.token;
@@ -134,6 +134,8 @@ export function registerTools(server, { data, cfg, social, knowledge }) {
       data.cfg.schedule = data.cfg.schedule ?? { posts: [] };
       data.cfg.schedule.posts.push({ id: slotId, brief, at, everyDays: every_days ?? null });
       data.saveConfig?.();
+      // A slot already in the past must surface now, not up to pollSeconds later.
+      kick?.();
       const out = { slotId, next: at };
       return { structuredContent: out, content: [{ type: 'text', text: JSON.stringify(out) }] };
     }
