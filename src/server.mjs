@@ -22,6 +22,12 @@ const LOCAL_CFG = path.join(ROOT, 'config.local.json');
 const cfgFile = fs.existsSync(LOCAL_CFG) ? LOCAL_CFG : CFG_FILE;
 if (cfgFile === LOCAL_CFG) Object.assign(cfg, JSON.parse(fs.readFileSync(LOCAL_CFG, 'utf8')));
 
+// Env wins over both files: the token is a secret, so it belongs in the
+// environment (or config.local.json), never in the committed config.json.
+if (process.env.SAM_TOKEN) cfg.token = process.env.SAM_TOKEN;
+if (process.env.SAM_PORT) cfg.port = Number(process.env.SAM_PORT);
+if (process.env.SAM_PUBLIC_HOST) cfg.publicHost = process.env.SAM_PUBLIC_HOST;
+
 // A background daemon must not die on one bad async tick or one stray rejection.
 // Losing the process means ChatGPT silently loses the connector.
 process.on('unhandledRejection', (err) => {

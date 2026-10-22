@@ -1,7 +1,13 @@
 // End-to-end check against an already-running server (node src/server.mjs).
 // Runs in Node so Vietnamese text is never mangled by a shell.
+import { dueOccurrence } from '../src/engine.mjs';
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787';
-const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+const TOKEN = process.env.SAM_TOKEN ?? '';
+const headers = {
+  'content-type': 'application/json',
+  accept: 'application/json, text/event-stream',
+  ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+};
 
 let id = 0;
 async function rpc(method, params) {
@@ -85,11 +91,34 @@ if (skipEv) {
   ok('skip does not publish', sk.performed === undefined);
 }
 
-// 6. audit trail
+// 6. recurrence: a daily slot already behind schedule fires ONCE for the most
+// recent occurrence, and publishing it does not raise the same occurrence again.
+const DAY = 864e5;
+const anchor = new Date(Date.now() - 3 * DAY).toISOString();
+const rslot = (await rpc('tools/call', { name: 'schedule_post', arguments: { brief: 'bài định kỳ', at: anchor, every_days: 1 } })).structuredContent;
+const rdue = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.find((e) => e.slotId === rslot.slotId);
+ok('recurring slot fired', !!rdue, rdue?.occurrence);
+ok('recurrence collapsed missed runs into one', rdue?.occurrence === dueOccurrence({ at: anchor, everyDays: 1 }), rdue?.occurrence);
+const occ = rdue.occurrence;
+await rpc('tools/call', { name: 'decide', arguments: { event_id: rdue.id, action: 'publish', text: 'Bài định kỳ hôm nay.', perform: true } });
+const again = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.filter((e) => e.slotId === rslot.slotId && e.occurrence === occ);
+ok('same occurrence is not raised twice', again.length === 0);
+
+// 7. audit trail
 const recent = (await rpc('tools/call', { name: 'recent_activity', arguments: {} })).structuredContent.decisions;
 ok('recent_activity has history', recent.length >= 2, recent.map((r) => `${r.kind}:${r.action}`).join(','));
 
-// 7. server still healthy after all that
+// 7. auth: when a token is configured, /mcp must reject a bare request.
+if (TOKEN) {
+  const bare = await fetch(`${BASE}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 999, method: 'tools/list' }),
+  });
+  ok('auth rejects request without token', bare.status === 401, `status=${bare.status}`);
+}
+
+// 8. server still healthy after all that
 const health = await (await fetch(`${BASE}/health`)).json();
 ok('server healthy', health.ok === true, `pending=${health.pending}`);
 

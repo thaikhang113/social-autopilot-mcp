@@ -4,14 +4,9 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 
 export function registerTools(server, { data, cfg, social, knowledge, kick }) {
-  const auth = (token) => {
-    if (!cfg.token || cfg.token === 'CHANGE_ME') return true; // local dev
-    return token === cfg.token;
-  };
-  const guard = (token) => {
-    if (!auth(token)) throw new Error('unauthorized: bad token');
-  };
-
+  // Auth is enforced once, at the HTTP layer (server.mjs). Per-tool `token` args
+  // are gone: an MCP client like ChatGPT sends credentials as an Authorization
+  // header, never inside tool arguments, so a token param could only ever fail.
   server.registerTool(
     'list_pending_events',
     {
@@ -58,13 +53,11 @@ export function registerTools(server, { data, cfg, social, knowledge, kick }) {
         text: z.string().optional(),
         reason: z.string().optional(),
         perform: z.boolean().optional(),
-        token: z.string().optional(),
       },
       outputSchema: { ok: z.boolean(), decided: z.string(), performed: z.string().optional() },
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
     },
-    async ({ event_id, action, text, reason, perform, token }) => {
-      guard(token);
+    async ({ event_id, action, text, reason, perform }) => {
       const ev = data.takeEvent(event_id);
       if (!ev) throw new Error(`unknown or already-decided event: ${event_id}`);
       if ((action === 'reply' || action === 'publish') && !text?.trim()) throw new Error(`${action} needs text`);
@@ -122,13 +115,11 @@ export function registerTools(server, { data, cfg, social, knowledge, kick }) {
         brief: z.string().describe('What this slot should be about / tone / goal'),
         at: z.string().describe('ISO date-time of the next occurrence'),
         every_days: z.number().int().min(1).max(365).optional(),
-        token: z.string().optional(),
       },
       outputSchema: { slotId: z.string(), next: z.string() },
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
     },
-    async ({ brief, at, every_days, token }) => {
-      guard(token);
+    async ({ brief, at, every_days }) => {
       if (!Number.isFinite(new Date(at).getTime())) throw new Error('at must be an ISO date-time');
       const slotId = `slot_${crypto.randomBytes(4).toString('hex')}`;
       data.cfg.schedule = data.cfg.schedule ?? { posts: [] };
