@@ -2,6 +2,7 @@
 // "what is pending" and "do the thing I decided".
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import { dueOccurrence, validateCron, DEFAULT_TZ } from './engine.mjs';
 
 export function registerTools(server, { data, cfg, social, knowledge, kick }) {
   // Auth is enforced once, at the HTTP layer (server.mjs). Per-tool `token` args
@@ -107,27 +108,48 @@ export function registerTools(server, { data, cfg, social, knowledge, kick }) {
   server.registerTool(
     'schedule_post',
     {
-      title: 'Schedule a recurring posting slot',
+      title: 'Schedule a posting slot (one-shot or cron)',
       description:
-        'Use when the user wants periodic posting. Creates a slot; when its time arrives the engine raises a ' +
-        'post_due event and the model writes the content then (so posts stay fresh).',
+        'Use when the user wants scheduled posting. Pass `cron` for a repeating schedule ' +
+        '(5 fields: minute hour day-of-month month day-of-week, e.g. "0 9 * * 1,3,5" = 09:00 Mon/Wed/Fri) ' +
+        'or only `at` for a single post at that moment. When a slot is due the engine raises a post_due ' +
+        'event and the model writes the content then, so posts never go stale.',
       inputSchema: {
         brief: z.string().describe('What this slot should be about / tone / goal'),
-        at: z.string().describe('ISO date-time of the next occurrence'),
-        every_days: z.number().int().min(1).max(365).optional(),
+        at: z
+          .string()
+          .optional()
+          .describe('ISO date-time. One-shot: when to post. With cron: earliest allowed run (defaults to now)'),
+        cron: z
+          .string()
+          .optional()
+          .describe('5-field cron in the schedule timezone. Mutually exclusive with every_days, which is gone'),
+        timezone: z.string().optional().describe('IANA zone for cron, e.g. Asia/Saigon. Defaults to schedule.timezone'),
       },
-      outputSchema: { slotId: z.string(), next: z.string() },
+      outputSchema: { slotId: z.string(), next: z.string(), cron: z.string().nullable() },
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
     },
-    async ({ brief, at, every_days }) => {
-      if (!Number.isFinite(new Date(at).getTime())) throw new Error('at must be an ISO date-time');
+    async ({ brief, at, cron, timezone }) => {
+      if (!at && !cron) throw new Error('provide `at` (one-shot) or `cron` (recurring)');
+      if (at && !Number.isFinite(new Date(at).getTime())) throw new Error('at must be an ISO date-time');
+      if (cron) validateCron(cron, timezone ?? data.cfg.schedule?.timezone);
+      const tz = timezone ?? data.cfg.schedule?.timezone;
+      if (tz) {
+        try {
+          new Intl.DateTimeFormat('en-US', { timeZone: tz });
+        } catch {
+          throw new Error(`unknown timezone: ${tz}`);
+        }
+      }
       const slotId = `slot_${crypto.randomBytes(4).toString('hex')}`;
+      const start = at ?? new Date().toISOString();
       data.cfg.schedule = data.cfg.schedule ?? { posts: [] };
-      data.cfg.schedule.posts.push({ id: slotId, brief, at, everyDays: every_days ?? null });
+      data.cfg.schedule.posts.push({ id: slotId, brief, at: start, cron: cron ?? null, ...(tz ? { timezone: tz } : {}) });
       data.saveConfig?.();
       // A slot already in the past must surface now, not up to pollSeconds later.
       kick?.();
-      const out = { slotId, next: at };
+      const next = dueOccurrence({ at: start, cron: cron ?? null }, Date.now(), tz ?? DEFAULT_TZ) ?? start;
+      const out = { slotId, next, cron: cron ?? null };
       return { structuredContent: out, content: [{ type: 'text', text: JSON.stringify(out) }] };
     }
   );

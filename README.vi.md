@@ -56,12 +56,12 @@ Server nhét đoạn này vào trường `instructions` của MCP, nên client m
 | `list_pending_events` | read-only | `{limit?}` → `{events:[{id, kind:'post_due'\|'comment', summary, ...}]}` |
 | `decide` | destructive | `{event_id, action:'skip'\|'reply'\|'publish', text?, reason?, perform?}` → `{ok, decided, performed?}` |
 | `verify_facts` | read-only | `{query, draft?}` → `{answer, sources[], supported:boolean}` |
-| `schedule_post` | non-destructive | `{brief, at, every_days?}` → `{slotId, next}` |
+| `schedule_post` | non-destructive | `{brief, at?, cron?, timezone?}` → `{slotId, next, cron}` |
 | `recent_activity` | read-only | `{limit?}` → `{decisions[]}` |
 
 `reply` / `publish` **bắt buộc** có `text`. `skip` thì không. Publish một event comment hoặc reply một event `post_due` sẽ không sinh ra `performed` — `decide` kiểm tra `kind`.
 
-Event `post_due` còn mang `slotId`, `occurrence` (khung thời gian nó đại diện) và `everyDays`. `occurrence` là thứ khiến việc lặp lại dedup được — xem §5.
+Event `post_due` còn mang `slotId`, `occurrence` (khung thời gian nó đại diện) và `cron`. `occurrence` là thứ khiến việc lặp lại dedup được — xem §5.
 
 ---
 
@@ -126,24 +126,32 @@ Bridge: `POST {query}` → `{answer, sources:[{title, url?}]}`.
 - Mỗi tick (mặc định 60s, `schedule.pollSeconds`) phát `post_due` cho slot chưa có event/đã quyết.
 - Nội dung do **model viết tại thời điểm cháy**, nên bài không bao giờ cũ — đó là lý do slot giữ `brief` (ý định) chứ không giữ `text`.
 
-### Một lần vs định kỳ
+### Một lần vs cron
 
-| `every_days` | Hành vi |
+| `cron` | Hành vi |
 |---|---|
-| bỏ trống / 0 | Cháy **một lần duy nhất**. Đăng xong là hết. |
-| `N ≥ 1` | Cháy mỗi N ngày, neo theo `at`. |
-
-`dueOccurrence(slot, now)` trong `src/engine.mjs` là **nơi duy nhất** quyết định *khi nào*. Với slot định kỳ nó trả về **occurrence gần nhất ≤ now**:
+| bỏ trống | Cháy **một lần duy nhất**, tại `at`. Đăng xong là hết. |
+| biểu thức 5 field | Cháy mỗi phút khớp lịch trong `timezone`, không bao giờ trước `at`. |
 
 ```
-occurrence = at + floor((now - at) / (N * days)) * (N * days)
+cron = "phút giờ ngày-trong-tháng tháng thứ-trong-tuần"
+"0 9 * * *"       → 09:00 mỗi ngày
+"0 9 * * 1,3,5"   → 09:00 thứ 2/4/6    (0=Chủ nhật, 1=thứ 2)
+"*/15 8-18 * * *" → mỗi 15 phút, 08:00–18:45
 ```
+
+`dueOccurrence(slot, now, tz)` trong `src/engine.mjs` là **nơi duy nhất** quyết định *khi nào*. Việc parse giao cho `cron-parser` (xử lý DST thật, range, step, tên thứ) — **đừng tự viết lại parser cron**. Với slot cron nó trả về **occurrence gần nhất ≤ now**, và không bao giờ sớm hơn `at`.
 
 **Các lần bị lỡ được gộp thành MỘT event — cố ý.** Server tắt 5 ngày thì slot daily chỉ bắn **1** `post_due` lúc khởi động, không phải 5. Đăng bù 5 bài liên tiếp không bao giờ là thứ người dùng muốn từ một tài khoản mạng xã hội.
 
-Dedup theo **từng occurrence**: event mang `occurrence`, history ghi lại, nên cùng một khung không bị bắn hai lần trong khi các khung sau vẫn cháy bình thường. **Đừng thêm timer thứ hai** để làm định kỳ — chỉ mở rộng `dueOccurrence`.
+Dedup theo **từng occurrence**: event mang `occurrence`, history ghi lại, nên cùng một khung không bị bắn hai lần trong khi các khung sau vẫn cháy bình thường.
 
-`every_days` nghĩa là *"mỗi N ngày đúng giờ của `at`"*, **không phải cron**. Lịch kiểu cron ("9h sáng thứ 2/4/6") cần một bước quy đổi `at` khác; seam là `dueOccurrence`, và shape của slot sẽ nhận thêm field `cron` thay cho `everyDays`.
+Hai chi tiết của parser dễ sai, cả hai đã được xử lý:
+
+- `prev()` của `cron-parser` **loại trừ** `currentDate`, nên hỏi đúng 09:00:00 với `"0 9 * * *"` sẽ trả về **hôm qua**. Engine parse từ `now + 1000ms` để mốc biên được tính là đã tới.
+- Chỉ nhận biểu thức **5 field**. Dạng 6 field đối với parser có nghĩa là "có giây", trong khi server này lên lịch theo phút — nên `schedule_post` từ chối luôn.
+
+`timezone` lấy từ `schedule.timezone` trong `config.json`, rồi tới timezone của máy. Cả parser và `Intl` đều kiểm tra, nên gõ sai là fail ngay lúc `schedule_post` chứ không tạo ra slot không bao giờ cháy.
 
 ---
 
@@ -163,8 +171,8 @@ Windows: dùng `start.cmd` (giữ cửa sổ mở — đóng là server chết).
 Chạy hai lần để phủ cả auth:
 
 ```bash
-node test/e2e.mjs                          # 14 check, không token
-SAM_TOKEN=secret node test/e2e.mjs         # 15 check, có case 401
+node test/e2e.mjs                          # 17 check, không token
+SAM_TOKEN=secret node test/e2e.mjs         # 18 check, có case 401
 ```
 
 ### Bí mật (token)
@@ -192,7 +200,7 @@ Auth được enforce **một lần, ở tầng HTTP**. Không có tham số `to
 |---|---|---|
 | `token` mặc định `CHANGE_ME` = tắt auth | tiện dev local | set `SAM_TOKEN` trước khi mở tunnel; thêm OAuth 2.1 + `/.well-known/oauth-protected-resource` nếu nhiều người dùng |
 | `supported` là trùng khớp từ | không thêm dependency, chạy offline | thay bằng kiểm tra ngữ nghĩa/LLM-as-judge, giữ nguyên shape trả về |
-| `every_days` là khoảng ngày, không phải cron | "đăng mỗi ngày" không cần parser cron | mở rộng `dueOccurrence` để xử lý field `cron`, xem §5 |
+| `every_days` là khoảng ngày, không phải cron | "đăng mỗi ngày" không cần parser cron | xong — thay bằng `cron` qua `cron-parser`, xem §5 |
 | Dùng file JSON thay vì DB | một người dùng, state nhỏ | chỉ thay `src/store.mjs`; giữ nguyên chữ ký `save()`/`pushEvent`/`takeEvent` |
 | HTTP stateless (không session, không SSE streaming) | cách đơn giản nhất ChatGPT chấp nhận | dùng `StreamableHTTPServerTransport` có session id nếu cần streaming |
 | `inbox.json` mock | chưa có inbox API thật | `social.kind:"http"` |
@@ -229,7 +237,7 @@ Production: dùng **OpenAI Secure MCP Tunnel** (`tunnel-client`, chỉ outbound)
 ```
 src/server.mjs    điểm vào, chọn transport, nạp env/config, auth HTTP, bắt lỗi process
 src/tools.mjs     5 tool MCP + zod schema
-src/engine.mjs    dueOccurrence() + timer: slot tới giờ + poll comment -> events
+src/engine.mjs    dueOccurrence()/validateCron() + timer: slot tới giờ + poll comment -> events
 src/adapters.mjs  Social (publish/reply/comments) + Knowledge (grounding)  <- seam để mở rộng
 src/store.mjs     lưu JSON, ghi nguyên tử có retry, log append-only
 config.json       cổng, loại adapter, các slot lịch (commit; không chứa bí mật)

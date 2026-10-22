@@ -40,7 +40,16 @@ process.on('uncaughtException', (err) => {
 const dataApi = {
   ...data,
   cfg,
-  saveConfig: () => fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2)),
+  saveConfig: () => {
+    const toSave = { ...cfg };
+    // When writing back to the committed config.json (not local), ensure env secrets
+    // or port overrides never get persisted to disk.
+    if (cfgFile === CFG_FILE) {
+      if (process.env.SAM_TOKEN) toSave.token = 'CHANGE_ME';
+      if (process.env.SAM_PORT) toSave.port = 8787;
+    }
+    fs.writeFileSync(cfgFile, JSON.stringify(toSave, null, 2));
+  },
 };
 const social = new Social(dataApi, cfg);
 const knowledge = new Knowledge(cfg);

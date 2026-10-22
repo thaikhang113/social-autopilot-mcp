@@ -56,12 +56,12 @@ The server injects this in the MCP `instructions` field, so a fresh client learn
 | `list_pending_events` | read-only | `{limit?}` → `{events:[{id, kind:'post_due'\|'comment', summary, ...}]}` |
 | `decide` | destructive | `{event_id, action:'skip'\|'reply'\|'publish', text?, reason?, perform?}` → `{ok, decided, performed?}` |
 | `verify_facts` | read-only | `{query, draft?}` → `{answer, sources[], supported:boolean}` |
-| `schedule_post` | non-destructive | `{brief, at, every_days?}` → `{slotId, next}` |
+| `schedule_post` | non-destructive | `{brief, at?, cron?, timezone?}` → `{slotId, next, cron}` |
 | `recent_activity` | read-only | `{limit?}` → `{decisions[]}` |
 
 `reply` / `publish` **require** `text`. `skip` does not. Publishing a comment event or replying to a post event is rejected implicitly (no `performed` is produced) — kinds are checked in `decide`.
 
-A `post_due` event also carries `slotId`, `occurrence` (the window it represents) and `everyDays`. `occurrence` is what makes recurrence deduplicable — see §5.
+A `post_due` event also carries `slotId`, `occurrence` (the window it represents) and `cron`. `occurrence` is what makes recurrence deduplicable — see §5.
 
 ---
 
@@ -124,24 +124,32 @@ Bridge: `POST {query}` → `{answer, sources:[{title, url?}]}`.
 - Each tick (default 60s, `schedule.pollSeconds`) emits `post_due` for a slot with no queued/decided event.
 - Content is written by the model **at fire time**, so posts never go stale — that is why the slot holds a `brief` (intent) instead of `text`.
 
-### One-shot vs recurring
+### One-shot vs cron
 
-| `every_days` | Behaviour |
+| `cron` | Behaviour |
 |---|---|
-| omitted / 0 | Fires once, ever. Once published, the slot is spent. |
-| `N ≥ 1` | Fires once per N-day window, anchored on `at`. |
-
-`dueOccurrence(slot, now)` in `src/engine.mjs` is the only place that decides *when*. For a recurring slot it returns the **most recent** occurrence at or before `now`:
+| omitted | Fires once, ever, at `at`. Once published, the slot is spent. |
+| 5-field expression | Fires at every matching minute in `timezone`, never before `at`. |
 
 ```
-occurrence = at + floor((now - at) / (N * days)) * (N * days)
+cron = "minute hour day-of-month month day-of-week"
+"0 9 * * *"      → 09:00 every day
+"0 9 * * 1,3,5"  → 09:00 Mon/Wed/Fri    (0=Sunday, 1=Monday)
+"*/15 8-18 * * *" → every 15 min, 08:00–18:45
 ```
+
+`dueOccurrence(slot, now, tz)` in `src/engine.mjs` is the only place that decides *when*. Parsing is delegated to `cron-parser` (real DST handling, ranges, steps, names) — do not hand-roll a cron parser. For a cron slot it returns the **most recent** occurrence at or before `now`, and never one earlier than `at`.
 
 **Missed runs collapse into a single event, deliberately.** If the server is off for five days, a daily slot raises one `post_due` on boot — not five. Catching up by posting five times is never what a user wants from a social account.
 
-Deduplication is per occurrence: the event carries `occurrence`, and history entries record it, so the same window is never raised twice while later windows still fire. Do not add a second timer to implement recurrence — extend `dueOccurrence` only.
+Deduplication is per occurrence: the event carries `occurrence`, and history entries record it, so the same window is never raised twice while later windows still fire.
 
-`every_days` means "every N days at the time of `at`", not cron. A cron-style schedule ("09:00 Mon/Wed/Fri") needs a different `at` resolution step; the seam is `dueOccurrence`, and the slot shape would gain a `cron` field instead of `everyDays`.
+Two parser details that are easy to get wrong, both already handled:
+
+- `cron-parser`'s `prev()` is **exclusive** of its `currentDate`, so asking at exactly 09:00:00 for `"0 9 * * *"` returns *yesterday*. The engine parses from `now + 1000ms` so the boundary occurrence counts as reached.
+- Only 5-field expressions are accepted. A 6-field form would silently mean "with seconds" to the parser while this server schedules on minute granularity, so `schedule_post` rejects it.
+
+`timezone` defaults to `schedule.timezone` in `config.json`, then to the host zone. Both the cron parser and `Intl` validate it, so a typo fails at `schedule_post` time rather than producing a slot that never fires.
 
 ---
 
@@ -156,13 +164,13 @@ npm test           # e2e, requires the server running
 
 Windows convenience: `start.cmd` (keep the window open — closing it stops the server).
 
-`test/e2e.mjs` is the only test and it covers the whole path: handshake, `tools/list`, grounding true **and** false cases, comment pickup, publish, reply, skip, recurrence collapse, per-occurrence dedup, optional auth rejection, audit trail, health. It talks over real HTTP to a real process — no mocks of the MCP layer.
+`test/e2e.mjs` is the only test and it covers the whole path: handshake, `tools/list`, grounding true **and** false cases, comment pickup, publish, reply, skip, cron firing, cron boundary timezone, missed-run collapse, per-occurrence dedup, invalid-cron rejection, 6-field rejection, optional auth rejection, audit trail, health. It talks over real HTTP to a real process — no mocks of the MCP layer.
 
 Run it twice to cover auth as well:
 
 ```bash
-node test/e2e.mjs                          # 14 checks, no token
-SAM_TOKEN=secret node test/e2e.mjs         # 15 checks, includes the 401 case
+node test/e2e.mjs                          # 17 checks, no token
+SAM_TOKEN=secret node test/e2e.mjs         # 18 checks, includes the 401 case
 ```
 
 ### Secrets
@@ -188,7 +196,7 @@ Auth is enforced **once, at the HTTP layer**. There is no per-tool `token` argum
 |---|---|---|
 | `token` defaults to `CHANGE_ME` = auth off | local dev convenience | set `SAM_TOKEN` before exposing a tunnel; add OAuth 2.1 + `/.well-known/oauth-protected-resource` for multi-user |
 | `supported` is word-overlap | zero deps, works offline | replace with a semantic/LLM-as-judge check behind the same return shape |
-| `every_days` is day-interval, not cron | no cron parser needed for "post every day" | extend `dueOccurrence` to resolve a `cron` field, see §5 |
+| `every_days` is day-interval, not cron | no cron parser needed for "post every day" | done — replaced by `cron` via `cron-parser`, see §5 |
 | JSON files instead of a DB | single user, tiny state | swap `src/store.mjs` only; keep `save()`/`pushEvent`/`takeEvent` signatures |
 | Stateless HTTP (no sessions, no SSE streaming) | simplest thing that ChatGPT accepts | use `StreamableHTTPServerTransport` with session ids if streaming responses are needed |
 | Mock `inbox.json` | no real inbox API available | `social.kind:"http"` |
@@ -219,10 +227,10 @@ Production: OpenAI **Secure MCP Tunnel** (`tunnel-client`, outbound-only) or a s
 ```
 src/server.mjs    entry point, transport selection, env/config load, HTTP auth, process error handling
 src/tools.mjs     the 5 MCP tools + zod schemas
-src/engine.mjs    dueOccurrence() + timers: due slots + comment polling -> events
+src/engine.mjs    dueOccurrence()/validateCron() + timers: due slots + comment polling -> events
 src/adapters.mjs  Social (publish/reply/comments) + Knowledge (grounding)  <- extensible seam
 src/store.mjs     JSON persistence, atomic save with retry, append-only log
-config.json       port, adapter kind, schedule slots (committed; no secrets)
+config.json       port, adapter kind, timezone, schedule slots (committed; no secrets)
 config.local.json optional gitignored override (token lives here or in SAM_TOKEN)
 docs/*.md         grounding corpus for verify_facts
 test/e2e.mjs      full-path integration test

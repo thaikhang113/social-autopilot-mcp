@@ -91,18 +91,47 @@ if (skipEv) {
   ok('skip does not publish', sk.performed === undefined);
 }
 
-// 6. recurrence: a daily slot already behind schedule fires ONCE for the most
-// recent occurrence, and publishing it does not raise the same occurrence again.
+// 6. cron recurrence: a daily slot anchored 3 days back fires ONCE for the most
+// recent occurrence (missed runs collapse), and publishing it does not raise the
+// same occurrence again.
 const DAY = 864e5;
 const anchor = new Date(Date.now() - 3 * DAY).toISOString();
-const rslot = (await rpc('tools/call', { name: 'schedule_post', arguments: { brief: 'bài định kỳ', at: anchor, every_days: 1 } })).structuredContent;
-const rdue = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.find((e) => e.slotId === rslot.slotId);
-ok('recurring slot fired', !!rdue, rdue?.occurrence);
-ok('recurrence collapsed missed runs into one', rdue?.occurrence === dueOccurrence({ at: anchor, everyDays: 1 }), rdue?.occurrence);
+const rslot = (
+  await rpc('tools/call', {
+    name: 'schedule_post',
+    arguments: { brief: 'bài định kỳ', cron: '0 9 * * *', at: anchor, timezone: 'Asia/Saigon' },
+  })
+).structuredContent;
+const rdue = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.find(
+  (e) => e.slotId === rslot.slotId
+);
+ok('cron slot fired', !!rdue, rdue?.occurrence);
+ok('cron occurrence is the latest run, not the anchor', new Date(rdue.occurrence) > new Date(anchor));
+ok(
+  'cron occurrence sits at 09:00 Asia/Saigon',
+  new Date(rdue.occurrence).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Asia/Saigon' }) === '09:00:00',
+  rdue.occurrence
+);
+ok('missed cron runs collapsed into one event', rdue.occurrence === dueOccurrence({ at: anchor, cron: '0 9 * * *' }, Date.now(), 'Asia/Saigon'));
 const occ = rdue.occurrence;
 await rpc('tools/call', { name: 'decide', arguments: { event_id: rdue.id, action: 'publish', text: 'Bài định kỳ hôm nay.', perform: true } });
-const again = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.filter((e) => e.slotId === rslot.slotId && e.occurrence === occ);
+const again = (await rpc('tools/call', { name: 'list_pending_events', arguments: {} })).structuredContent.events.filter(
+  (e) => e.slotId === rslot.slotId && e.occurrence === occ
+);
 ok('same occurrence is not raised twice', again.length === 0);
+
+// 6b. a malformed cron must fail at write time, not silently never fire.
+// A thrown tool error surfaces as result.isError, not as a JSON-RPC error.
+const toolError = async (args) => {
+  const r = await rpc('tools/call', { name: 'schedule_post', arguments: args });
+  return r.isError ? r.content.map((c) => c.text).join(' ') : null;
+};
+const badCron = await toolError({ brief: 'x', cron: '0 25 * * *', at: new Date().toISOString() });
+ok('invalid cron rejected', !!badCron, badCron?.slice(0, 60));
+
+// 6c. six-field cron (seconds) is rejected: this server is minute-granular.
+const sixField = await toolError({ brief: 'x', cron: '30 9 * * * *', at: new Date().toISOString() });
+ok('6-field cron rejected', !!sixField, sixField?.slice(0, 60));
 
 // 7. audit trail
 const recent = (await rpc('tools/call', { name: 'recent_activity', arguments: {} })).structuredContent.decisions;
