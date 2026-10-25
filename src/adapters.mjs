@@ -4,21 +4,55 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
+const DATA_DIR = process.env.SAM_DATA_DIR
+  ? path.resolve(process.env.SAM_DATA_DIR)
+  : path.join(ROOT, 'data');
 
-async function post(url, body, token) {
+function httpTimeout() {
+  const value = Number(process.env.SAM_HTTP_TIMEOUT_MS ?? 15_000);
+  return Number.isFinite(value) && value > 0 ? value : 15_000;
+}
+
+async function post(url, body, token, options = {}) {
+  const headers = {
+    'content-type': 'application/json; charset=utf-8',
+    accept: 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}),
+  };
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json; charset=utf-8', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(httpTimeout()),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`${url} -> ${res.status} ${text.slice(0, 300)}`);
-  return text ? JSON.parse(text) : {};
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (res.ok) throw new Error(`${url} -> invalid JSON response: ${text.slice(0, 120)}`);
+    }
+  }
+  if (!res.ok) {
+    const err = new Error(`${url} -> ${res.status} ${text.slice(0, 300)}`);
+    err.status = res.status;
+    err.definitive = res.status >= 400 && res.status < 500;
+    throw err;
+  }
+  if (data?.error) {
+    const message = data.error.message ?? JSON.stringify(data.error);
+    const err = new Error(`${url} -> API error: ${message}`);
+    err.definitive = false;
+    throw err;
+  }
+  return data;
 }
 
 async function fb(endpoint, token, opts = {}) {
   const version = opts.version ?? 'v21.0';
-  const url = `https://graph.facebook.com/${version}/${endpoint}`;
+  const url = /^https?:\/\//i.test(endpoint) ? endpoint : `https://graph.facebook.com/${version}/${endpoint}`;
   const isPost = opts.method === 'POST';
   const res = await fetch(url, {
     method: opts.method ?? 'GET',
@@ -27,17 +61,26 @@ async function fb(endpoint, token, opts = {}) {
       ...(isPost ? { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8' } : {}),
     },
     ...(isPost && opts.body ? { body: new URLSearchParams(opts.body).toString() } : {}),
+    signal: AbortSignal.timeout(httpTimeout()),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`Facebook API ${endpoint} -> ${res.status}: ${data.error?.message ?? JSON.stringify(data)}`);
+  // Graph API can return HTTP 200 with {error:{...}}; treating that as success
+  // produced ids of undefined and lost the post.
+  if (!res.ok || data?.error) {
+    const message = data?.error?.message ?? JSON.stringify(data);
+    const err = new Error(`Facebook API ${endpoint} -> ${res.status}: ${message}`);
+    err.status = res.status;
+    err.definitive = !data?.error && res.status >= 400 && res.status < 500;
+    throw err;
+  }
   return data;
 }
 
 // ---------- social adapter ----------
 // Contract for kind:"http": POST {op, ...} to SOCIAL_URL
-//   {op:'publish', text, media?}      -> {id}
-//   {op:'reply', comment_id, text}    -> {id}
-//   {op:'comments', since?}           -> {comments:[{id, author, text, post_id, at}]}
+//   {op:'publish', text, media?, idempotency_key?}  -> {id}
+//   {op:'reply', comment_id, text, idempotency_key?} -> {id}
+//   {op:'comments', since?}                         -> {comments:[{id, author, text, post_id, at}]}
 export class Social {
   constructor(data, cfg) {
     this.data = data;
@@ -47,31 +90,86 @@ export class Social {
     }
   }
 
-  async publish(text, media = []) {
-    if (this.cfg.kind === 'http') return post(this.cfg.url, { op: 'publish', text, media }, this.cfg.token);
+  async publish(text, media = [], options = {}) {
+    if (this.cfg.kind === 'http') {
+      return post(
+        this.cfg.url,
+        { op: 'publish', text, media, ...(options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {}) },
+        this.cfg.token,
+        options
+      );
+    }
     if (this.cfg.kind === 'facebook') {
       const pageId = this.cfg.pageId ?? process.env.FB_PAGE_ID;
       const token = this.cfg.pageAccessToken ?? this.cfg.token ?? process.env.FB_PAGE_ACCESS_TOKEN;
       if (!pageId || !token) throw new Error('Facebook adapter requires pageId and pageAccessToken (or FB_PAGE_ID, FB_PAGE_ACCESS_TOKEN)');
-      // ponytail: text-only posts; upgrade to multi-media attachments or /photos endpoint when media[] is passed
-      const r = await fb(`${pageId}/feed`, token, { method: 'POST', body: { message: text }, version: this.cfg.apiVersion });
-      return { id: r.id };
+      if (Array.isArray(media) && media.length > 0) {
+        throw new Error('Facebook adapter is text-only; media[] is not supported yet');
+      }
+      const result = await fb(`${pageId}/feed`, token, {
+        method: 'POST',
+        body: { message: text },
+        version: this.cfg.apiVersion,
+      });
+      if (!result.id) {
+        const err = new Error('Facebook publish returned no id');
+        err.definitive = false;
+        throw err;
+      }
+      return { id: result.id };
     }
-    const item = { id: `post_${Date.now()}`, text, media, at: new Date().toISOString(), platform: this.cfg.platform ?? 'mock' };
+    if (options.idempotencyKey) {
+      const existing = this.data.state.outbox.find((item) => item.idempotency_key === options.idempotencyKey);
+      if (existing) return { id: existing.id, deduped: true };
+    }
+    const item = {
+      id: `post_${Date.now()}`,
+      text,
+      media,
+      at: new Date().toISOString(),
+      platform: this.cfg.platform ?? 'mock',
+      ...(options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {}),
+    };
     this.data.state.outbox.push({ type: 'publish', ...item });
     this.data.save();
     return { id: item.id };
   }
 
-  async reply(commentId, text) {
-    if (this.cfg.kind === 'http') return post(this.cfg.url, { op: 'reply', comment_id: commentId, text }, this.cfg.token);
+  async reply(commentId, text, options = {}) {
+    if (this.cfg.kind === 'http') {
+      return post(
+        this.cfg.url,
+        { op: 'reply', comment_id: commentId, text, ...(options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {}) },
+        this.cfg.token,
+        options
+      );
+    }
     if (this.cfg.kind === 'facebook') {
       const token = this.cfg.pageAccessToken ?? this.cfg.token ?? process.env.FB_PAGE_ACCESS_TOKEN;
       if (!token) throw new Error('Facebook adapter requires pageAccessToken (or FB_PAGE_ACCESS_TOKEN)');
-      const r = await fb(`${commentId}/comments`, token, { method: 'POST', body: { message: text }, version: this.cfg.apiVersion });
-      return { id: r.id };
+      const result = await fb(`${commentId}/comments`, token, {
+        method: 'POST',
+        body: { message: text },
+        version: this.cfg.apiVersion,
+      });
+      if (!result.id) {
+        const err = new Error('Facebook reply returned no id');
+        err.definitive = false;
+        throw err;
+      }
+      return { id: result.id };
     }
-    const item = { id: `reply_${Date.now()}`, comment_id: commentId, text, at: new Date().toISOString() };
+    if (options.idempotencyKey) {
+      const existing = this.data.state.outbox.find((item) => item.idempotency_key === options.idempotencyKey && item.type === 'reply');
+      if (existing) return { id: existing.id, deduped: true };
+    }
+    const item = {
+      id: `reply_${Date.now()}`,
+      comment_id: commentId,
+      text,
+      at: new Date().toISOString(),
+      ...(options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {}),
+    };
     this.data.state.outbox.push({ type: 'reply', ...item });
     this.data.save();
     return { id: item.id };
@@ -79,50 +177,59 @@ export class Social {
 
   async comments(since) {
     if (this.cfg.kind === 'http') {
-      const r = await post(this.cfg.url, { op: 'comments', since }, this.cfg.token);
-      return r.comments ?? [];
+      const result = await post(this.cfg.url, { op: 'comments', since }, this.cfg.token);
+      const fromApi = result.comments ?? [];
+      return this.#withUnhandled(fromApi);
     }
     if (this.cfg.kind === 'facebook') {
       const pageId = this.cfg.pageId ?? process.env.FB_PAGE_ID;
       const token = this.cfg.pageAccessToken ?? this.cfg.token ?? process.env.FB_PAGE_ACCESS_TOKEN;
-      if (!pageId || !token) return [];
-      // ponytail: polls first page of feed comments & nested replies; upgrade to Meta Webhooks for real-time push
-      const sinceParam = since ? `&since=${Math.floor(new Date(since).getTime() / 1000)}` : '';
-      const r = await fb(
-        `${pageId}/feed?fields=comments{id,from,message,created_time,comments{id,from,message,created_time}}${sinceParam}`,
-        token,
-        { version: this.cfg.apiVersion }
-      );
+      if (!pageId || !token) return this.#withUnhandled([]);
+      const sinceMs = since ? Date.parse(since) : 0;
+      const maxPages = Math.max(1, Number(this.cfg.maxFeedPages ?? 5));
       const out = [];
       const collect = (list, postId) => {
-        for (const c of list ?? []) {
-          if (pageId && c.from?.id === pageId) continue;
+        for (const comment of list ?? []) {
+          if (pageId && comment.from?.id === pageId) continue;
+          if (Number.isFinite(sinceMs) && sinceMs > 0 && comment.created_time) {
+            const created = Date.parse(comment.created_time);
+            if (Number.isFinite(created) && created < sinceMs) continue;
+          }
           out.push({
-            id: c.id,
-            author: c.from?.name ?? 'Facebook User',
-            text: c.message || '[Sticker/Hình ảnh]',
+            id: comment.id,
+            author: comment.from?.name ?? 'Facebook User',
+            text: comment.message || '[Sticker/Hình ảnh]',
             post_id: postId,
-            at: c.created_time,
+            at: comment.created_time,
           });
-          if (c.comments?.data) collect(c.comments.data, postId);
+          if (comment.comments?.data) collect(comment.comments.data, postId);
         }
       };
-      for (const p of r.data ?? []) {
-        collect(p.comments?.data, p.id);
+      let next = `${pageId}/feed?fields=comments.limit(100){id,from,message,created_time,comments.limit(100){id,from,message,created_time}}&limit=100`;
+      for (let page = 0; next && page < maxPages; page += 1) {
+        const result = await fb(next, token, { version: this.cfg.apiVersion });
+        for (const post of result.data ?? []) collect(post.comments?.data, post.id);
+        next = result.paging?.next;
       }
-      return out;
+      return this.#withUnhandled(out);
     }
     // mock: the "platform" pushes new comments into data/inbox.json (this is the
     // stand-in for a real webhook/inbox API). Append to it to simulate traffic.
-    const inbox = path.join(ROOT, 'data', 'inbox.json');
+    const inbox = path.join(DATA_DIR, 'inbox.json');
     let file = [];
     try {
       file = fs.existsSync(inbox) ? JSON.parse(fs.readFileSync(inbox, 'utf8')) : [];
     } catch {
       file = []; // half-written by an external writer: retry next tick
     }
-    const seen = new Set(this.data.state.inbound.map((c) => c.id));
-    return [...file.filter((c) => !seen.has(c.id)), ...this.data.state.inbound.filter((c) => !c.handled)];
+    const seen = new Set(this.data.state.inbound.map((comment) => comment.id));
+    return [...file.filter((comment) => !seen.has(comment.id)), ...this.data.state.inbound.filter((comment) => !comment.handled)];
+  }
+
+  #withUnhandled(fromApi) {
+    const seen = new Set((fromApi ?? []).map((comment) => comment.id));
+    const pending = (this.data.state.inbound ?? []).filter((comment) => !comment.handled && !seen.has(comment.id));
+    return [...(fromApi ?? []), ...pending];
   }
 }
 
@@ -138,22 +245,21 @@ export class Knowledge {
     // file kind: naive grounding over docs/*.md so replies stop hallucinating
     const dir = path.resolve(ROOT, this.cfg.dir ?? 'docs');
     if (!fs.existsSync(dir)) return { answer: '', sources: [] };
-    const terms = String(query).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w.length >= 2);
+    const terms = String(query).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((word) => word.length >= 2);
     const hits = [];
-    for (const f of fs.readdirSync(dir).filter((f) => /\.(md|txt|json)$/i.test(f))) {
-      const body = fs.readFileSync(path.join(dir, f), 'utf8');
-      const lines = body.split('\n');
-      for (const line of lines) {
+    for (const file of fs.readdirSync(dir).filter((name) => /\.(md|txt|json)$/i.test(name))) {
+      const body = fs.readFileSync(path.join(dir, file), 'utf8');
+      for (const line of body.split('\n')) {
         const low = line.toLowerCase();
-        const score = terms.reduce((n, t) => n + (low.includes(t) ? 1 : 0), 0);
-        if (score > 0) hits.push({ score, text: line.trim(), source: f });
+        const score = terms.reduce((count, term) => count + (low.includes(term) ? 1 : 0), 0);
+        if (score > 0) hits.push({ score, text: line.trim(), source: file });
       }
     }
     hits.sort((a, b) => b.score - a.score);
     const top = hits.slice(0, 8);
     return {
-      answer: top.map((h) => h.text).join('\n'),
-      sources: [...new Set(top.map((h) => h.source))].map((title) => ({ title })),
+      answer: top.map((hit) => hit.text).join('\n'),
+      sources: [...new Set(top.map((hit) => hit.source))].map((title) => ({ title })),
       matched: top.length,
     };
   }

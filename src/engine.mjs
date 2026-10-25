@@ -10,6 +10,11 @@ export function validateCron(cron, tz = DEFAULT_TZ) {
   const fields = cron.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error(`cron must have exactly 5 fields, got ${fields.length}`);
   try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+  } catch {
+    throw new Error(`unknown timezone: ${tz}`);
+  }
+  try {
     CronExpressionParser.parse(cron, { tz });
   } catch (e) {
     throw new Error(`invalid cron: ${e.message}`);
@@ -51,11 +56,14 @@ export function startEngine({ data, cfg, social }) {
   const seedDuePosts = () => {
     const now = Date.now();
     for (const slot of cfg.schedule?.posts ?? []) {
-      const occ = dueOccurrence(slot, now, tz);
+      const occ = dueOccurrence(slot, now, slot.timezone ?? tz);
       if (!occ) continue;
-      // Occurrence-scoped dedup: the same window is never raised twice, while
-      // later windows still fire. A one-shot slot has one window, so it is spent.
-      const done = data.state.history.some((h) => h.slotId === slot.id && h.occurrence === occ);
+      // Occurrence-scoped dedup: history survives for audit, but slotDone is the
+      // compact map that still blocks a re-raise after history is trimmed.
+      const slotDone = data.state.slotDone?.[slot.id];
+      const done =
+        (slotDone && Date.parse(slotDone) >= Date.parse(occ)) ||
+        data.state.history.some((h) => h.slotId === slot.id && h.occurrence === occ);
       const queued = data.state.events.some((e) => e.slotId === slot.id && e.occurrence === occ);
       if (done || queued) continue;
       data.pushEvent({
@@ -80,28 +88,41 @@ export function startEngine({ data, cfg, social }) {
       return;
     }
     for (const c of list) {
+      // An inbound row with handled:false is NOT proof that the event is still
+      // queued. A failed reply used to delete the event, then this check hid the
+      // comment forever. Only handled rows (or history/queued events) are known.
+      const inbound = data.state.inbound.find((x) => x.id === c.id);
       const known =
-        data.state.inbound.some((x) => x.id === c.id) ||
+        inbound?.handled ||
+        data.state.commentDone?.[c.id] ||
         data.state.history.some((h) => h.commentId === c.id) ||
         data.state.events.some((e) => e.commentId === c.id);
       if (known) continue;
-      data.state.inbound.push({ ...c, handled: false });
+      if (!inbound) data.state.inbound.push({ ...c, handled: false });
       data.pushEvent({ id: data.nextId('evt'), kind: 'comment', commentId: c.id, author: c.author, text: c.text, createdAt: new Date().toISOString() });
     }
   };
 
+  let ticking = false;
   const tick = async () => {
-    // Never let one bad poll kill the process: async errors in setInterval are
-    // unhandled rejections, which terminate node by default.
+    // A slow platform must not overlap two polls and raise the same comment twice.
+    if (ticking) return;
+    ticking = true;
     try {
-      seedDuePosts();
-    } catch (err) {
-      data.log({ type: 'engine_error', where: 'posts', message: String(err?.message ?? err) });
-    }
-    try {
-      await seedComments();
-    } catch (err) {
-      data.log({ type: 'engine_error', where: 'comments', message: String(err?.message ?? err) });
+      // Never let one bad poll kill the process: async errors in setInterval are
+      // unhandled rejections, which terminate node by default.
+      try {
+        seedDuePosts();
+      } catch (err) {
+        data.log({ type: 'engine_error', where: 'posts', message: String(err?.message ?? err) });
+      }
+      try {
+        await seedComments();
+      } catch (err) {
+        data.log({ type: 'engine_error', where: 'comments', message: String(err?.message ?? err) });
+      }
+    } finally {
+      ticking = false;
     }
   };
   tick();

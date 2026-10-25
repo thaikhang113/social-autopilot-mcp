@@ -28,7 +28,7 @@ Ba phần độc lập, tách rời có chủ đích:
 
 | Phần | File | Trách nhiệm |
 |---|---|---|
-| Bề mặt quyết định | `src/tools.mjs` | 5 tool MCP mà model gọi |
+| Bề mặt quyết định | `src/tools.mjs` | 6 tool MCP mà model gọi |
 | Engine kích hoạt | `src/engine.mjs` | Quyết định *khi nào* có việc (chỉ timer) |
 | Tác dụng phụ | `src/adapters.mjs` | Nói chuyện với nền tảng thật / knowledge base |
 
@@ -47,19 +47,22 @@ Server nhét đoạn này vào trường `instructions` của MCP, nên client m
 4. decide(perform=true)              -> mới thật sự gửi
 ```
 
-`decide` **không** có `perform=true` chỉ ghi lại quyết định (chạy khô). Cố ý như vậy: thao tác ghi là **hai pha** để một bản nháp tệ không bao giờ bị gửi nhầm.
+`decide` **không** có `perform=true` là **bản xem trước không phá gì**: không tiêu thụ event, không ghi history, không đánh dấu comment đã xử lý. Gọi lại với `perform=true` mới gửi. `skip` tự nó là một quyết định, nên tiêu thụ event dù không có `perform`.
 
-### 5 tool
+### 6 tool
 
 | Tool | Annotations | Hợp đồng |
 |---|---|---|
 | `list_pending_events` | read-only | `{limit?}` → `{events:[{id, kind:'post_due'\|'comment', summary, ...}]}` |
-| `decide` | destructive | `{event_id, action:'skip'\|'reply'\|'publish', text?, reason?, perform?}` → `{ok, decided, performed?}` |
-| `verify_facts` | read-only | `{query, draft?}` → `{answer, sources[], supported:boolean}` |
-| `schedule_post` | non-destructive | `{brief, at?, cron?, timezone?}` → `{slotId, next, cron}` |
+| `decide` | destructive | `{event_id, action:'skip'\|'reply'\|'publish', text?, reason?, perform?, retry?}` → `{ok, decided, performed?, dryRun?}` |
+| `verify_facts` | read-only | `{query, draft?}` → `{answer, sources[], supported:boolean, reason?}` |
+| `schedule_post` | non-destructive | `{brief, at?, cron?, timezone?}` → `{slotId, next, cron, deduped?}` |
+| `cancel_slot` | destructive | `{slot_id}` → `{ok, removed, pendingRemoved}` |
 | `recent_activity` | read-only | `{limit?}` → `{decisions[]}` |
 
-`reply` / `publish` **bắt buộc** có `text`. `skip` thì không. Publish một event comment hoặc reply một event `post_due` sẽ không sinh ra `performed` — `decide` kiểm tra `kind`.
+`reply` / `publish` **bắt buộc** có `text`. `skip` thì không. Kind được kiểm tra tường minh: event `post_due` chỉ nhận `publish|skip`, event `comment` chỉ nhận `reply|skip`. Sai action sẽ trả tool error và event vẫn còn chờ.
+
+Nếu event có cảnh báo `lastAttempt`, lần gửi trước có thể đã tới nền tảng dù server ghi nhận thất bại. Kiểm tra trên nền tảng rồi truyền `retry=true`; nếu không server từ chối để tránh gửi trùng. Event id được giữ nguyên qua các lần lỗi.
 
 Event `post_due` còn mang `slotId`, `occurrence` (khung thời gian nó đại diện) và `cron`. `occurrence` là thứ khiến việc lặp lại dedup được — xem §5.
 
@@ -73,16 +76,22 @@ State nằm trong `data/state.json` (ghi nguyên tử: temp + rename, có retry)
 {
   "seq": 0,
   "events":  [],   // chờ quyết định, bị decide() tiêu thụ
-  "history": [],   // event đã quyết, audit trail, không bao giờ xoá
+  "history": [],   // event đã quyết, audit trail (giữ tối đa 5000 gần nhất)
   "inbound": [],   // comment đã thấy, kèm cờ handled
-  "outbox":  []    // những gì mock đã đăng/trả lời
+  "outbox":  [],   // những gì mock đã đăng/trả lời (giữ tối đa 2000 gần nhất)
+  "inflight": {},  // lần gửi đang chạy; khôi phục thành "ambiguous" sau crash
+  "slotDone": {},  // occurrence đã quyết gần nhất của mỗi slot (không mất khi trim history)
+  "commentDone": {} // dedupe comment chỉ theo id (giới hạn 20000)
 }
 ```
 
-`data/log.jsonl` là log append-only (`{type:'event'|'decision'|'poll_error'|'engine_error', ...}`).
+`data/log.jsonl` là log append-only (`{type:'event'|'decision'|'decision_error'|'poll_error'|'engine_error'|'slot_cancelled', ...}`). Log tự xoay sang `log.jsonl.1`…`.3` khi đạt 5 MB mặc định.
 `data/inbox.json` là "feed comment mới" của nền tảng mock — đóng vai webhook/inbox API thật.
+`data/.lock` là PID lock một-instance; server thứ hai dùng cùng thư mục data sẽ thoát với mã 1.
 
-**Bất biến:** một event id xuất hiện trong `events` tối đa một lần, và khi đã quyết thì chuyển sang `history`. `decide` với id lạ/đã quyết sẽ ném lỗi.
+State được kiểm tra khi nạp: field hỏng/sai kiểu (ví dụ `"events": {}`) được reset kèm cảnh báo thay vì làm mọi tool crash. Compaction giữ **mọi** comment chưa xử lý và 5000 comment đã xử lý gần nhất, nên dedupe vẫn đúng mà file không phình vô hạn.
+
+**Bất biến:** một event id xuất hiện trong `events` tối đa một lần, và khi đã quyết thì chuyển sang `history`. Gửi lỗi sẽ **khôi phục đúng event id** với `lastAttempt` thay vì làm mất quyết định; lần gửi bị gián đoạn được khôi phục lúc khởi động với `lastAttempt.status:"unknown"` và bắt buộc `retry=true`.
 
 ---
 
@@ -111,12 +120,16 @@ Bridge phải nhận `POST` và trả lời 3 op:
 
 | op | request | response |
 |---|---|---|
-| `publish` | `{text, media}` | `{id}` |
-| `reply` | `{comment_id, text}` | `{id}` |
+| `publish` | `{text, media, idempotency_key?}` | `{id}` |
+| `reply` | `{comment_id, text, idempotency_key?}` | `{id}` |
 | `comments` | `{since}` | `{comments:[{id, author, text, post_id, at}]}` |
+
+Server cũng gửi header `Idempotency-Key: <event id>`. Bridge nào tôn trọng header này có thể retry an toàn; mock adapter dedupe key trong `state.outbox`. Graph API của Facebook không có header này, nên lần gửi Facebook "ambiguous" phải kiểm tra thủ công trước khi `retry=true`.
 
 `kind:"mock"` (mặc định) ghi vào `state.outbox` và đọc comment từ `data/inbox.json`.
 Hợp đồng này chính là **seam**: Eclincher, Buffer, Postiz, scheduler tự viết, hay một MCP server khác đều lắp vừa.
+
+**Adapter Facebook:** `social.kind:"facebook"` dùng Page feed/comments API. Nó từ chối HTTP 200 chứa `{error}`, theo phân trang feed (giới hạn `social.maxFeedPages`, mặc định 5), lọc comment theo `since` thay vì dựa vào `since` của feed, và **chỉ hỗ trợ text** — truyền `media[]` sẽ throw thay vì âm thầm bỏ qua. Đây vẫn là polling, không phải webhook, nên bài quá cũ có thể nằm ngoài cửa sổ phân trang.
 
 ### Knowledge / grounding (chống bịa)
 
@@ -129,14 +142,16 @@ Bridge: `POST {query}` → `{answer, sources:[{title, url?}]}`.
 
 `kind:"file"` (mặc định) chấm điểm từng dòng trong `docs/*.md` theo trùng khớp từ khoá — không cần embedding, không cần mạng. Thả file vào `docs/` là grounding chạy được ngay.
 
-`supported` được tính: **≥ 35%** số từ trong draft dài hơn 4 ký tự xuất hiện trong đoạn văn lấy về. Đây là **heuristic**, không phải kiểm chứng thật — xem §7.
+`supported` được tính: **≥ 50%** số từ trong draft dài ≥2 ký tự (không phân biệt dấu) xuất hiện trong đoạn văn lấy về **và** không có mâu thuẫn phủ định/từ trái nghĩa. Ví dụ “X không phải mã nguồn mở” bị từ chối khi tài liệu nói “X là mã nguồn mở”, và “thu phí” bị từ chối khi tài liệu nói “miễn phí”. Draft rỗng trả `supported:false`. Đây là **heuristic**, không phải kiểm chứng thật — xem §7.
 
 ---
 
 ## 5. Ngữ nghĩa lịch đăng
 
 - `schedule_post` thêm slot vào `schedule.posts` và **gọi tick engine ngay**, nên slot có `at` đã qua sẽ hiện tức thì thay vì chờ tới `pollSeconds`.
-- Mỗi tick (mặc định 60s, `schedule.pollSeconds`) phát `post_due` cho slot chưa có event/đã quyết.
+- Gọi lại y hệt `brief`/`at`/`cron`/`timezone` sẽ trả slot cũ với `deduped:true`, không xếp chồng slot trùng.
+- `cancel_slot` xoá slot và mọi `post_due` event đang chờ của slot đó. Lần gửi đã bắt đầu thì không thu hồi được.
+- Mỗi tick (mặc định 60s, `schedule.pollSeconds`) phát `post_due` cho slot chưa có event/đã quyết. Các tick không chồng nhau, nên nền tảng chậm không thể làm một comment bị raise hai lần.
 - Nội dung do **model viết tại thời điểm cháy**, nên bài không bao giờ cũ — đó là lý do slot giữ `brief` (ý định) chứ không giữ `text`.
 
 ### Một lần vs cron
@@ -174,21 +189,29 @@ Hai chi tiết của parser dễ sai, cả hai đã được xử lý:
 npm install
 npm start          # HTTP, http://127.0.0.1:8787/mcp  (+ /health)
 npm run stdio      # stdio cho client local
-npm test           # e2e, cần server đang chạy
+npm test           # unit + ops + e2e cô lập + kiểm tra docs
 ```
 
-Windows: dùng `start.cmd` (giữ cửa sổ mở — đóng là server chết).
+Windows: dùng `start.cmd` (dùng chính thư mục chứa file qua `%~dp0`, nên có thể di chuyển checkout). Giữ cửa sổ mở — đóng là server chết.
 
-`test/e2e.mjs` là test duy nhất và phủ toàn bộ đường đi: handshake, `tools/list`, grounding cả **đúng** và **sai**, nhặt comment, publish, reply, skip, gộp lần lỡ, dedup theo occurrence, auth (tuỳ chọn), audit trail, health. Nó nói chuyện qua **HTTP thật với process thật** — không mock tầng MCP.
+`npm test` **không cần** server đang chạy và **không chạm** vào `data/` thật. Khi không có `BASE`, `test/e2e.mjs` copy config vào thư mục tạm, tự spawn server ở cổng ngẫu nhiên với `SAM_DATA_DIR`/`SAM_CONFIG_FILE`, rồi xoá sạch khi thoát. Đặt `BASE=http://127.0.0.1:8787` để test server đang chạy; khi đó người gọi tự chịu trách nhiệm về thư mục data của server.
 
-Chạy hai lần để phủ cả auth:
+Bộ test gồm:
+- `test/adapters.test.mjs` — biên response/phân trang Facebook.
+- `test/edge-cases.test.mjs` — tìm kiếm/grounding tiếng Việt và dedupe cron.
+- `test/reliability.test.mjs` — deep-merge config, chặn phủ định, state hỏng, gửi lỗi/ambiguous, re-raise comment, xoay log, lock một-instance.
+- `test/ops.test.mjs` — port sai, `EADDRINUSE`, server thứ hai, giới hạn body, rate limit.
+- `test/e2e.mjs` — HTTP/process thật: handshake, 6 tool, grounding đúng/sai/phủ định, nhặt comment, dry-run, publish, reply, skip, chặn sai kind, cron, dedupe, cancel, auth, CORS, health.
+- `test/readme-check.mjs` — encoding, fence, parity EN/VI.
+
+E2E in **32 check** ở cả hai chế độ auth. Check auth khẳng định 401 khi có `SAM_TOKEN`, và request không token được chấp nhận khi auth tắt:
 
 ```bash
-node test/e2e.mjs                          # 17 check, không token
-SAM_TOKEN=secret node test/e2e.mjs         # 18 check, có case 401
+node test/e2e.mjs                          # 32 check, auth tắt
+SAM_TOKEN=secret node test/e2e.mjs         # 32 check, có case 401
 ```
 
-### Bí mật (token)
+### Bí mật (token) và giới hạn
 
 Token được đọc theo thứ tự: biến môi trường → `config.local.json` (gitignore) → `config.json`:
 
@@ -196,14 +219,22 @@ Token được đọc theo thứ tự: biến môi trường → `config.local.j
 |---|---|
 | `SAM_TOKEN` | Bearer token bắt buộc trên `/mcp`. Không set hoặc `CHANGE_ME` = tắt auth (chỉ dùng khi dev local). |
 | `SAM_PORT` | Đổi cổng (mặc định 8787). |
-| `SAM_PUBLIC_HOST` | Host công khai ghi vào `instructions` cho client. |
+| `SAM_PUBLIC_HOST` | URL công khai ghi vào `instructions` của MCP (ví dụ `https://xxx.trycloudflare.com`). |
+| `SAM_CONFIG_FILE` | Đường dẫn `config.json` thay thế (dùng cho test/ops). |
+| `SAM_DATA_DIR` | Thư mục state/log/inbox thay thế (dùng cho test/ops). |
+| `SAM_MAX_BODY_BYTES` | Giới hạn body khai báo; mặc định 1000000, `0` = tắt. |
+| `SAM_RATE_LIMIT` | Số request `/mcp` mỗi phút mỗi IP; mặc định 300, `0` = tắt. |
+| `SAM_LOG_MAX_BYTES` | Ngưỡng xoay log; mặc định 5 MB. |
+| `SAM_HTTP_TIMEOUT_MS` | Timeout request bridge/Facebook; mặc định 15000. |
 
 ```powershell
 $env:SAM_TOKEN = 'chuoi-ngau-nhien-dai'
 node src\server.mjs
 ```
 
-Auth được enforce **một lần, ở tầng HTTP**. Không có tham số `token` trong từng tool — MCP client gửi credential qua header `Authorization`, **không bao giờ** nhét vào tool arguments, nên tham số đó chỉ có thể fail.
+Giá trị env **không bao giờ** bị ghi ngược bởi `schedule_post`/`cancel_slot`; chỉ `config.local.json` (hoặc config committed khi chưa có local) được cập nhật, và `SAM_TOKEN`/`SAM_PORT`/`SAM_PUBLIC_HOST` bị loại khỏi lần ghi đó.
+
+Auth được enforce **một lần, ở tầng HTTP** với so sánh timing-safe. Không có tham số `token` trong từng tool — MCP client gửi credential qua header `Authorization`, **không bao giờ** nhét vào tool arguments, nên tham số đó chỉ có thể fail. `/health` vẫn công khai nhưng ẩn số event đang chờ nếu request không được authorize.
 
 ---
 
@@ -212,9 +243,11 @@ Auth được enforce **một lần, ở tầng HTTP**. Không có tham số `to
 | Giới hạn | Vì sao có | Nâng cấp đúng cách |
 |---|---|---|
 | `token` mặc định `CHANGE_ME` = tắt auth | tiện dev local | set `SAM_TOKEN` trước khi mở tunnel; thêm OAuth 2.1 + `/.well-known/oauth-protected-resource` nếu nhiều người dùng |
-| `supported` là trùng khớp từ | không thêm dependency, chạy offline | thay bằng kiểm tra ngữ nghĩa/LLM-as-judge, giữ nguyên shape trả về |
+| `supported` là trùng khớp từ + kiểm tra phủ định | không thêm dependency, chạy offline | thay bằng kiểm tra ngữ nghĩa/LLM-as-judge, giữ nguyên shape trả về |
 | `every_days` là khoảng ngày, không phải cron | "đăng mỗi ngày" không cần parser cron | xong — thay bằng `cron` qua `cron-parser`, xem §5 |
-| Dùng file JSON thay vì DB | một người dùng, state nhỏ | chỉ thay `src/store.mjs`; giữ nguyên chữ ký `save()`/`pushEvent`/`takeEvent` |
+| Dùng file JSON thay vì DB | một người dùng, state nhỏ | chỉ thay `src/store.mjs`; giữ nguyên chữ ký `save()`/`pushEvent`/`takeEvent`. History/outbox được compact, nên đây không phải audit archive vô hạn. |
+| Facebook là polling và chỉ text | chưa có webhook server / upload media trong phạm vi này | thêm Meta Webhooks và `/photos`; media hiện fail rõ ràng thay vì bị bỏ qua |
+| Lock một-instance là PID file | không thêm dependency | thay bằng DB advisory lock nếu data dir chuyển sang volume dùng chung |
 | HTTP stateless (không session, không SSE streaming) | cách đơn giản nhất ChatGPT chấp nhận | dùng `StreamableHTTPServerTransport` có session id nếu cần streaming |
 | `inbox.json` mock | chưa có inbox API thật | `social.kind:"http"` |
 
@@ -223,7 +256,11 @@ Auth được enforce **một lần, ở tầng HTTP**. Không có tham số `to
 ## 8. Ghi chú vận hành — học bằng cách trả giá
 
 - **Tuyệt đối không chạy trong thư mục được OneDrive sync.** OneDrive giữ lock file; lệnh ghi state ném lỗi trong callback timer, thành unhandled rejection, và **giết process im lặng sau vài phút**. `save()` giờ có retry, nhưng cách sửa thật là dùng đường dẫn không sync (`D:\` trên máy này).
-- `setInterval(asyncFn)` không nuốt lỗi: một rejection ở đó **kết liễu Node theo mặc định**. Engine bọc từng bước trong try/catch, và `server.mjs` cài `unhandledRejection` / `uncaughtException` vì đây là daemon chạy dài.
+- Bind lỗi hoặc `SAM_PORT` sai giờ ghi lý do và thoát **mã 1**, để supervisor/terminal biết server không listen. Process thứ hai trên cùng data dir bị `data/.lock` từ chối thay vì âm thầm ghi đè quyết định.
+- `unhandledRejection` được log; `uncaughtException` được log và thoát non-zero (tiếp tục chạy sau lỗi fatal không rõ là không an toàn). Engine vẫn bọc từng bước poll để một tick lỗi không giết daemon.
+- Body khai báo vượt `SAM_MAX_BODY_BYTES` nhận HTTP 413; `/mcp` bị rate-limit theo IP (`SAM_RATE_LIMIT`). HTTP server cũng đặt timeout request/header.
+- CORS dùng `Access-Control-Allow-Origin: *` vì MCP client thường chạy server-side và xác thực bằng Bearer header, không dùng cookie. Nếu đặt app browser có cookie phía trước, hãy giới hạn origin thay vì dựa vào wildcard.
+- `/health` công khai nhưng chỉ lộ số event đang chờ khi request có token hợp lệ; so sánh auth là timing-safe.
 - Khởi động nền trên Windows sống sót qua shell đã đóng:
   `cmd /c start "" /b node src\server.mjs`
 
@@ -239,7 +276,7 @@ cloudflared tunnel --url http://127.0.0.1:8787   # -> https://<random>.trycloudf
 
 Sau đó: <https://chatgpt.com/plugins> → `+` → **Add custom MCP server** → URL `https://<random>.trycloudflare.com/mcp` → **Create as a plugin**.
 
-Nếu server có `SAM_TOKEN`, connector phải gửi `Authorization: Bearer <token>` — khai báo lúc thêm connector, không thì mọi call bị 401.
+Nếu server có `SAM_TOKEN`, connector phải gửi `Authorization: Bearer <token>` — khai báo lúc thêm connector, không thì mọi call bị 401. Đặt `SAM_PUBLIC_HOST=https://<random>.trycloudflare.com` để URL `/mcp` công khai xuất hiện trong `instructions`; giá trị này không bao giờ bị ghi vào file config.
 
 Production: dùng **OpenAI Secure MCP Tunnel** (`tunnel-client`, chỉ outbound) hoặc một endpoint HTTPS cố định. Quick tunnel chỉ để dev.
 
@@ -248,13 +285,20 @@ Production: dùng **OpenAI Secure MCP Tunnel** (`tunnel-client`, chỉ outbound)
 ## 10. Bản đồ file
 
 ```
-src/server.mjs    điểm vào, chọn transport, nạp env/config, auth HTTP, bắt lỗi process
-src/tools.mjs     5 tool MCP + zod schema
-src/engine.mjs    dueOccurrence()/validateCron() + timer: slot tới giờ + poll comment -> events
-src/adapters.mjs  Social (publish/reply/comments) + Knowledge (grounding)  <- seam để mở rộng
-src/store.mjs     lưu JSON, ghi nguyên tử có retry, log append-only
-config.json       cổng, loại adapter, các slot lịch (commit; không chứa bí mật)
-config.local.json override tuỳ chọn, gitignore (token nằm đây hoặc trong SAM_TOKEN)
-docs/*.md         corpus grounding cho verify_facts
-test/e2e.mjs      test tích hợp toàn đường đi
+src/server.mjs       điểm vào, chọn transport, nạp env/config, auth/giới hạn HTTP, bắt lỗi process
+src/tools.mjs        6 tool MCP + zod schema
+src/decision.mjs     decide() transaction: validate kind/action, dry-run, retry, khôi phục inflight
+src/config.mjs       deep merge + chuẩn hoá shape/port/timezone
+src/grounding.mjs    overlap + chặn phủ định/từ trái nghĩa cho verify_facts
+src/engine.mjs       dueOccurrence()/validateCron() + timer: slot tới giờ + poll comment -> events
+src/adapters.mjs     Social (mock/http/facebook) + Knowledge (grounding)  <- seam để mở rộng
+src/store.mjs        lưu JSON, compact state, ghi nguyên tử, xoay log, inflight attempts
+src/state-schema.mjs helper normalize/compact/recover thuần (unit-testable)
+src/lock.mjs         PID lock một-instance trong data dir
+config.json          cổng, loại adapter, timezone, các slot lịch (commit; không chứa bí mật)
+config.local.json    override tuỳ chọn, gitignore (token nằm đây hoặc trong SAM_TOKEN)
+docs/*.md            corpus grounding cho verify_facts
+test/e2e.mjs         test tích hợp toàn đường đi, cô lập
+test/reliability.test.mjs  regression config/grounding/state/decision/lock
+test/ops.test.mjs    exit code, một-instance, body/rate limit
 ```

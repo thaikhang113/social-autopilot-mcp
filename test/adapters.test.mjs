@@ -76,3 +76,74 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+// ---------- regression: Facebook HTTP 200 errors, pagination, since filter, media ----------
+const originalFetch2 = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  const target = String(url);
+  if (target.includes('page_err/feed')) {
+    return { ok: true, status: 200, json: async () => ({ error: { message: 'permission denied' } }) };
+  }
+  if (target.includes('page_pag/feed')) {
+    if (!target.includes('after=abc')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            {
+              id: 'post_p1',
+              comments: {
+                data: [
+                  { id: 'c_old', from: { id: 'u1', name: 'Old' }, message: 'old', created_time: '2020-01-01T00:00:00Z' },
+                  { id: 'c_new', from: { id: 'u2', name: 'New' }, message: 'new', created_time: new Date().toISOString() },
+                ],
+              },
+            },
+          ],
+          paging: { next: 'https://graph.facebook.com/v21.0/page_pag/feed?after=abc' },
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [
+          {
+            id: 'post_p2',
+            comments: {
+              data: [{ id: 'c_second', from: { id: 'u3', name: 'Second' }, message: 'second', created_time: new Date().toISOString() }],
+            },
+          },
+        ],
+      }),
+    };
+  }
+  return { ok: true, status: 200, json: async () => ({ id: 'unexpected' }) };
+};
+
+try {
+  const dummyData = { state: { outbox: [], inbound: [] }, save: () => {} };
+
+  const errorSocial = new Social(dummyData, {
+    social: { kind: 'facebook', pageId: 'page_err', pageAccessToken: 'token_abc' },
+  });
+  await assert.rejects(errorSocial.publish('will fail'), /permission denied/);
+
+  const mediaSocial = new Social(dummyData, {
+    social: { kind: 'facebook', pageId: 'page_pag', pageAccessToken: 'token_abc' },
+  });
+  await assert.rejects(mediaSocial.publish('with media', [{ type: 'image' }]), /text-only/);
+
+  const pageSocial = new Social(dummyData, {
+    social: { kind: 'facebook', pageId: 'page_pag', pageAccessToken: 'token_abc' },
+  });
+  const comments = await pageSocial.comments(new Date(Date.now() - 864e5).toISOString());
+  assert.deepEqual(comments.map((comment) => comment.id), ['c_new', 'c_second']);
+  assert.equal(comments[0].text, 'new');
+
+  console.log('✅ adapters regression: 200 error, pagination, since filter and media verified');
+} finally {
+  globalThis.fetch = originalFetch2;
+}

@@ -1,4 +1,4 @@
-// Throwaway check: Vietnamese README survived as real UTF-8 and is structurally sane.
+// Docs parity: catch drift between README.md and README.vi.md.
 import fs from 'node:fs';
 
 const FENCE = '`'.repeat(3);
@@ -22,7 +22,23 @@ check('VI links to English', vi.includes('](README.md)'));
 check('EN links to Vietnamese', en.includes('](README.vi.md)'));
 check('same section count', (vi.match(/^## /gm) || []).length === (en.match(/^## /gm) || []).length,
   `vi=${(vi.match(/^## /gm) || []).length} en=${(en.match(/^## /gm) || []).length}`);
-check('VI keeps tool names verbatim', ['list_pending_events', 'decide', 'verify_facts', 'schedule_post', 'recent_activity'].every((n) => vi.includes(n)));
-check('VI keeps env names verbatim', ['SAM_TOKEN', 'SAM_PORT', 'SAM_PUBLIC_HOST'].every((n) => vi.includes(n)));
+
+const tools = ['list_pending_events', 'decide', 'verify_facts', 'schedule_post', 'cancel_slot', 'recent_activity'];
+const envs = [
+  'SAM_TOKEN',
+  'SAM_PORT',
+  'SAM_PUBLIC_HOST',
+  'SAM_CONFIG_FILE',
+  'SAM_DATA_DIR',
+  'SAM_MAX_BODY_BYTES',
+  'SAM_RATE_LIMIT',
+  'SAM_LOG_MAX_BYTES',
+  'SAM_HTTP_TIMEOUT_MS',
+];
+for (const [name, text] of [['EN', en], ['VI', vi]]) {
+  check(`${name} keeps tool names verbatim`, tools.every((n) => text.includes(n)));
+  check(`${name} keeps env names verbatim`, envs.every((n) => text.includes(n)));
+  check(`${name} documents health/CORS/retry`, text.includes('/health') && text.includes('CORS') && text.includes('retry=true'));
+}
 
 process.exit(fail ? 1 : 0);
